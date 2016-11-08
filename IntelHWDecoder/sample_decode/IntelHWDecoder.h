@@ -51,6 +51,8 @@ struct VideoParam
 	int width;
 	int height;
 	int forcc;
+
+	bool valid() const { return !(width <= 0 || height <= 0 || forcc == 0); }
 };
 
 class IntelHWDecoder :
@@ -116,7 +118,9 @@ protected: // functions
 	*/
 	virtual mfxStatus SyncOutputSurface(mfxU32 wait);
 	virtual mfxStatus DeliverOutput(mfxFrameSurface1* frame);
-	//virtual void PrintPerFrameStat(bool force = false);
+	mfxStatus getFrameData(mfxFrameSurface1* frame, unsigned char* buf, int& bufLen);
+	mfxStatus copyFrameData(mfxFrameSurface1* pSurface, unsigned char* buf, int& bufLen);
+		//virtual void PrintPerFrameStat(bool force = false);
 
 	//virtual mfxStatus DeliverLoop(void);
 
@@ -163,6 +167,7 @@ protected: // variables
 	std::vector<mfxExtBuffer*> m_VppExtParams;
 	mfxU16                  m_diMode;//标识是否启用反交错
 	bool					m_needDecodeHeader;
+	VideoParam				m_vFrameParam;
 	/*
 
 	MSDKSemaphore*          m_pDeliverOutputSemaphore; // to access to DeliverOutput method

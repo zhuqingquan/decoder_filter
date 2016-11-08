@@ -60,7 +60,7 @@ IntelHWDecoder::IntelHWDecoder(const TCHAR* outfilename)
 	m_VppDeinterlacing.Header.BufferSz = sizeof(m_VppDeinterlacing);
 
 	m_hwdev = NULL;
-
+	MSDK_ZERO_MEMORY(m_vFrameParam);
 #ifdef LIBVA_SUPPORT
 	m_export_mode = vaapiAllocatorParams::DONOT_EXPORT;
 	m_bPerfMode = false;
@@ -438,6 +438,9 @@ mfxStatus IntelHWDecoder::InitMfxParams(DecoderInitParam *pParams)
 		sts = m_pmfxDEC->DecodeHeader(&m_mfxBS, &m_mfxVideoParams);
 		if (!sts)
 		{
+			m_vFrameParam.width = m_mfxVideoParams.mfx.FrameInfo.Width;
+			m_vFrameParam.height = m_mfxVideoParams.mfx.FrameInfo.Height;
+			m_vFrameParam.forcc = m_mfxVideoParams.mfx.FrameInfo.FourCC;
 			//decode header success
 			m_bVppIsUsed = IsVppRequired(pParams);
 		}
@@ -1089,6 +1092,10 @@ mfxStatus IntelHWDecoder::decode(unsigned char* pdata, size_t len, unsigned int 
 	if (m_needDecodeHeader)
 	{
 		sts = decodeHeader(pdata, len);
+		if (sts == MFX_ERR_NONE)
+		{
+			m_needDecodeHeader = false;
+		}
 	}
 	//docode the real data
 	//m_mfxBS.Data = pdata;
@@ -1420,7 +1427,6 @@ mfxStatus IntelHWDecoder::decodeHeader(unsigned char* sequenceHeader, size_t len
 	//		MSDK_CHECK_RESULT(sts, MFX_ERR_NONE, sts);
 	//	}
 
-	m_needDecodeHeader = false;
 	return sts;
 }
 
@@ -1524,16 +1530,193 @@ mfxStatus IntelHWDecoder::DeliverOutput(mfxFrameSurface1* frame)
 	return res;
 }
 
+mfxStatus IntelHWDecoder::getFrameData(mfxFrameSurface1* frame, unsigned char* buf, int& bufLen)
+{
+	mfxStatus res = MFX_ERR_NONE, sts = MFX_ERR_NONE;
+
+	if (!frame) {
+		return MFX_ERR_NULL_PTR;
+	}
+
+	if (m_bExternalAlloc) {
+		//		if (m_eWorkMode == MODE_FILE_DUMP) {
+		res = m_pGeneralAllocator->Lock(m_pGeneralAllocator->pthis, frame->Data.MemId, &(frame->Data));
+		if (MFX_ERR_NONE == res) {
+			//res = m_FileWriter.WriteNextFrame(frame);
+			res = copyFrameData(frame, buf, bufLen);
+			sts = m_pGeneralAllocator->Unlock(m_pGeneralAllocator->pthis, frame->Data.MemId, &(frame->Data));
+		}
+		if ((MFX_ERR_NONE == res) && (MFX_ERR_NONE != sts)) {
+			res = sts;
+		}
+	}
+
+	return res;
+}
+
+mfxStatus IntelHWDecoder::copyFrameData(mfxFrameSurface1* pSurface, unsigned char* buf, int& bufLen)
+{
+	MSDK_CHECK_POINTER(pSurface, MFX_ERR_NULL_PTR);
+
+	mfxFrameInfo &pInfo = pSurface->Info;
+	mfxFrameData &pData = pSurface->Data;
+
+	mfxU32 i, j, h, w;
+	mfxU32 vid = pInfo.FrameId.ViewId;
+	unsigned int wpos = 0;
+
+	switch (pInfo.FourCC)
+	{
+	case MFX_FOURCC_YV12:
+	case MFX_FOURCC_NV12:
+		for (i = 0; i < pInfo.CropH; i++)
+		{
+			memcpy(buf + wpos, pData.Y + (pInfo.CropY*pData.Pitch + pInfo.CropX) + i*pData.Pitch, pInfo.CropW);
+			wpos += pInfo.CropW;
+		}
+		break;
+	case MFX_FOURCC_P010:
+		//for (i = 0; i < pInfo.CropH; i++)
+		//{
+		//	MSDK_CHECK_NOT_EQUAL(
+		//		fwrite(pData.Y + (pInfo.CropY * pData.Pitch + pInfo.CropX) + i * pData.Pitch, 1, (mfxU32)pInfo.CropW * 2, m_fDest),
+		//		(mfxU32)pInfo.CropW * 2, MFX_ERR_UNDEFINED_BEHAVIOR);
+		//}
+		break;
+	case MFX_FOURCC_RGB4:
+	case 100: //DXGI_FORMAT_AYUV
+	case MFX_FOURCC_A2RGB10:
+		// Implementation for RGB4 and A2RGB10 in the next switch below
+		break;
+
+	default:
+		return MFX_ERR_UNSUPPORTED;
+	}
+	switch (pInfo.FourCC)
+	{
+	case MFX_FOURCC_YV12:
+		for (i = 0; i < (mfxU32)pInfo.CropH / 2; i++)
+		{
+			memcpy(buf + wpos, pData.U + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) + i * pData.Pitch / 2, pInfo.CropW / 2);
+			wpos += pInfo.CropW / 2;
+		}
+		for (i = 0; i < (mfxU32)pInfo.CropH / 2; i++)
+		{
+			memcpy(buf + wpos, pData.V + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX / 2) + i * pData.Pitch / 2, pInfo.CropW / 2);
+			wpos += pInfo.CropW / 2;
+		}
+		break;
+
+	case MFX_FOURCC_NV12:
+		h = pInfo.CropH / 2;
+		w = pInfo.CropW;
+		for (i = 0; i < h; i++)
+		{
+			for (j = 0; j < w; j += 2)
+			{
+				buf[wpos] = *(pData.UV + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX) + i * pData.Pitch + j);
+				wpos++;
+				//MSDK_CHECK_NOT_EQUAL(
+				//	fwrite(pData.UV + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX) + i * pData.Pitch + j, 1, 1, m_fDest),
+				//	1, MFX_ERR_UNDEFINED_BEHAVIOR);
+			}
+		}
+		for (i = 0; i < h; i++)
+		{
+			for (j = 1; j < w; j += 2)
+			{
+				buf[wpos] = *(pData.UV + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX) + i * pData.Pitch + j);
+				wpos++;
+				//MSDK_CHECK_NOT_EQUAL(
+				//	fwrite(pData.UV + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX) + i * pData.Pitch + j, 1, 1, m_fDest),
+				//	1, MFX_ERR_UNDEFINED_BEHAVIOR);
+			}
+		}
+		break;
+
+	case MFX_FOURCC_P010:
+		//for (i = 0; i < (mfxU32)pInfo.CropH / 2; i++)
+		//{
+		//	MSDK_CHECK_NOT_EQUAL(
+		//		fwrite(pData.UV + (pInfo.CropY * pData.Pitch / 2 + pInfo.CropX) + i * pData.Pitch, 1, (mfxU32)pInfo.CropW * 2, m_fDest),
+		//		(mfxU32)pInfo.CropW * 2, MFX_ERR_UNDEFINED_BEHAVIOR);
+		//}
+		break;
+
+	case MFX_FOURCC_RGB4:
+	case 100: //DXGI_FORMAT_AYUV
+	case MFX_FOURCC_A2RGB10:
+		//mfxU8* ptr;
+
+		//if (pInfo.CropH > 0 && pInfo.CropW > 0)
+		//{
+		//	w = pInfo.CropW;
+		//	h = pInfo.CropH;
+		//}
+		//else
+		//{
+		//	w = pInfo.Width;
+		//	h = pInfo.Height;
+		//}
+
+		//ptr = MSDK_MIN(MSDK_MIN(pData.R, pData.G), pData.B);
+		//ptr = ptr + pInfo.CropX + pInfo.CropY * pData.Pitch;
+
+		//for (i = 0; i < h; i++)
+		//{
+		//	MSDK_CHECK_NOT_EQUAL(
+		//		fwrite(ptr + i * pData.Pitch, 1, 4 * w, m_fDest),
+		//		4 * w, MFX_ERR_UNDEFINED_BEHAVIOR);
+		//}
+		//fflush(m_fDest);
+		break;
+
+	default:
+		return MFX_ERR_UNSUPPORTED;
+	}
+	bufLen = wpos;
+	return MFX_ERR_NONE;
+}
+
 mfxStatus IntelHWDecoder::getDecodedParam(VideoParam& param)
 {
 	mfxStatus res = MFX_ERR_NONE;
-	param;
+	if (!m_vFrameParam.valid())
+	{
+		return MFX_ERR_INVALID_VIDEO_PARAM;
+	}
+	param = m_vFrameParam;
 	return res;
 }
 mfxStatus IntelHWDecoder::getDecodedData(unsigned char* output, int &outLen, int& pts)
 {
 	mfxStatus res = MFX_ERR_NONE;
-	output; outLen; pts;
+	if (output == NULL || outLen <= 0)
+		return MFX_ERR_NULL_PTR;
+	if (!m_pCurrentOutputSurface) {
+		m_pCurrentOutputSurface = m_OutputSurfacesPool.GetSurface();
+	}
+	if (!m_pCurrentOutputSurface) {
+		return MFX_ERR_MORE_DATA;
+	}
+
+	mfxStatus sts = m_mfxSession.SyncOperation(m_pCurrentOutputSurface->syncp, 50);
+
+	if (MFX_WRN_IN_EXECUTION == sts) {
+		return sts;
+	}
+	if (MFX_ERR_NONE == sts) {
+		//sts = DeliverOutput(&(m_pCurrentOutputSurface->surface->frame));
+		sts = getFrameData(&(m_pCurrentOutputSurface->surface->frame), output, outLen);
+		ReturnSurfaceToBuffers(m_pCurrentOutputSurface);
+		m_pCurrentOutputSurface = NULL;
+	}
+
+	if (MFX_ERR_NONE != sts) {
+		sts = MFX_ERR_UNKNOWN;
+	}
+
+	return sts;
 	return res;
 }
 

@@ -661,7 +661,13 @@ DWORD WINAPI decodedVideoThreadWork(LPVOID param)
 	//swprintf_s(msg, _T("D:\\´úÂëºÚ¶´\\datasource\\new\\720X576_%d.xh264"))
 	std::ifstream encDataFile(pDThParam->inputFileName, std::ios::in | std::ios::binary);
 	//std::ifstream encDataFile(_T("D:\\rtmp_result_with_size.h264"), std::ios::in | std::ios::binary);
+	std::ofstream decedOutFile("tmp.yuv", std::ios::out | std::ios::binary);
+	VideoParam vParam;
+	memset(&vParam, 0, sizeof(vParam));
+	int bufLen = 0;
+	unsigned char* outbuf = NULL;
 	int dts = 0;
+	int pts = 0;
 	while (encDataFile)
 	{
 		size_t len;
@@ -670,7 +676,21 @@ DWORD WINAPI decodedVideoThreadWork(LPVOID param)
 		{
 			char* buf = (char*)malloc(len);
 			encDataFile.read(buf, len);
-			decoder->decode((unsigned char*)buf, len, dts);
+			mfxStatus sts = decoder->decode((unsigned char*)buf, len, dts);
+			if (sts == MFX_ERR_NONE || MFX_ERR_MORE_DATA==sts || MFX_ERR_MORE_SURFACE==sts)
+			{
+				decoder->getDecodedParam(vParam);
+				if (bufLen == 0)
+				{
+					bufLen = vParam.width * vParam.height * 3;
+					outbuf = (unsigned char*)malloc(bufLen);
+				}
+				sts = decoder->getDecodedData(outbuf, bufLen, pts);
+				if (sts == MFX_ERR_NONE)
+				{
+					decedOutFile.write((char*)outbuf, bufLen);
+				}
+			}
 			Sleep(20);
 			free(buf);
 			dts += 40;
